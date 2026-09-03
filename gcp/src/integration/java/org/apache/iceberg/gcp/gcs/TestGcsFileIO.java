@@ -43,6 +43,8 @@ import org.apache.iceberg.gcp.GCPProperties;
 import org.apache.iceberg.io.FileInfo;
 import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.OutputFile;
+import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
@@ -269,5 +271,105 @@ public class TestGcsFileIO {
     fileIO.deleteFile(in);
 
     assertThat(fileIO.newInputFile(location).exists()).isFalse();
+  }
+
+  @Test
+  void writeAndReadWithAnalyticsCoreEnabled() throws IOException {
+    String location = String.format("gs://%s/path/to/analytics-write.dat", BUCKET);
+    fileIO.initialize(
+        ImmutableMap.of(
+            GCPProperties.GCS_ANALYTICS_CORE_ENABLED,
+            "true",
+            GCPProperties.GCS_NO_AUTH,
+            "true",
+            GCPProperties.GCS_SERVICE_HOST,
+            String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
+
+    byte[] expected = new byte[2 * 1024 * 1024];
+    RANDOM.nextBytes(expected);
+
+    OutputFile out = fileIO.newOutputFile(location);
+    try (PositionOutputStream stream = out.createOrOverwrite()) {
+      stream.write(expected);
+      assertThat(stream.getPos()).isEqualTo(expected.length);
+    }
+
+    InputFile in = fileIO.newInputFile(location);
+    assertThat(in.exists()).isTrue();
+    assertThat(in.getLength()).isEqualTo(expected.length);
+
+    try (InputStream stream = in.newStream()) {
+      byte[] actual = new byte[expected.length];
+      IOUtil.readFully(stream, actual, 0, expected.length);
+      assertThat(actual).isEqualTo(expected);
+    }
+  }
+
+  @Test
+  void chunkedUploadCommit() throws IOException {
+    String location = String.format("gs://%s/path/to/chunked-upload.dat", BUCKET);
+    fileIO.initialize(
+        ImmutableMap.of(
+            GCPProperties.GCS_ANALYTICS_CORE_ENABLED,
+            "true",
+            GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE,
+            "CHUNK_UPLOAD",
+            GCPProperties.GCS_NO_AUTH,
+            "true",
+            GCPProperties.GCS_SERVICE_HOST,
+            String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
+
+    byte[] expected = new byte[1024 * 1024];
+    RANDOM.nextBytes(expected);
+
+    OutputFile out = fileIO.newOutputFile(location);
+    try (PositionOutputStream stream = out.create()) {
+      stream.write(expected);
+      assertThat(stream.getPos()).isEqualTo(expected.length);
+    }
+
+    InputFile in = fileIO.newInputFile(location);
+    assertThat(in.exists()).isTrue();
+    assertThat(in.getLength()).isEqualTo(expected.length);
+
+    try (InputStream stream = in.newStream()) {
+      byte[] actual = new byte[expected.length];
+      IOUtil.readFully(stream, actual, 0, expected.length);
+      assertThat(actual).isEqualTo(expected);
+    }
+  }
+
+  @Test
+  void writeWithChecksumValidation() throws IOException {
+    String location = String.format("gs://%s/path/to/checksum-write.dat", BUCKET);
+    fileIO.initialize(
+        ImmutableMap.of(
+            GCPProperties.GCS_ANALYTICS_CORE_ENABLED,
+            "true",
+            GCPProperties.GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED,
+            "true",
+            GCPProperties.GCS_NO_AUTH,
+            "true",
+            GCPProperties.GCS_SERVICE_HOST,
+            String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
+
+    byte[] expected = new byte[512 * 1024];
+    RANDOM.nextBytes(expected);
+
+    OutputFile out = fileIO.newOutputFile(location);
+    try (PositionOutputStream stream = out.createOrOverwrite()) {
+      stream.write(expected);
+      assertThat(stream.getPos()).isEqualTo(expected.length);
+    }
+
+    InputFile in = fileIO.newInputFile(location);
+    assertThat(in.exists()).isTrue();
+    assertThat(in.getLength()).isEqualTo(expected.length);
+
+    try (InputStream stream = in.newStream()) {
+      byte[] actual = new byte[expected.length];
+      IOUtil.readFully(stream, actual, 0, expected.length);
+      assertThat(actual).isEqualTo(expected);
+    }
   }
 }

@@ -28,8 +28,11 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.OutputFile;
 import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.metrics.MetricsContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class GCSOutputFile extends BaseGCSFile implements OutputFile {
+  private static final Logger LOG = LoggerFactory.getLogger(GCSOutputFile.class);
 
   static GCSOutputFile fromLocation(
       String location, PrefixedStorage storage, MetricsContext metrics) {
@@ -69,6 +72,18 @@ class GCSOutputFile extends BaseGCSFile implements OutputFile {
 
   @Override
   public PositionOutputStream createOrOverwrite() {
+    if (gcpProperties().isGcsAnalyticsCoreEnabled()) {
+      try {
+        return AnalyticsCoreUtil.newOutputStream(
+            gcsFileSystem(), blobId(), gcpProperties(), metrics());
+      } catch (LinkageError | IOException e) {
+        LOG.error(
+            "Failed to create GCS analytics core output stream for {}, falling back to default.",
+            uri(),
+            e);
+      }
+    }
+
     try {
       return new GCSOutputStream(storage(), blobId(), gcpProperties(), metrics());
     } catch (IOException e) {

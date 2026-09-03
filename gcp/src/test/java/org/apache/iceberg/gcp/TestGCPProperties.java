@@ -23,6 +23,7 @@ import static org.apache.iceberg.gcp.GCPProperties.GCS_OAUTH2_REFRESH_CREDENTIAL
 import static org.apache.iceberg.gcp.GCPProperties.GCS_OAUTH2_REFRESH_CREDENTIALS_ENDPOINT;
 import static org.apache.iceberg.gcp.GCPProperties.GCS_OAUTH2_TOKEN;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
@@ -76,5 +77,83 @@ public class TestGCPProperties {
         .isPresent()
         .get()
         .isEqualTo("/v1/credentials");
+  }
+
+  @Test
+  void verifyChannelWritePropertiesDefaults() {
+    GCPProperties gcpProperties = new GCPProperties();
+    assertThat(gcpProperties.kmsKeyName()).isNull();
+    assertThat(gcpProperties.checksumValidationEnabled())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_DEFAULT);
+    assertThat(gcpProperties.channelWriteUploadType())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE_DEFAULT);
+    assertThat(gcpProperties.channelWritePcuBufferCount())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT_DEFAULT);
+    assertThat(gcpProperties.channelWritePcuBufferCapacity())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY_DEFAULT);
+    assertThat(gcpProperties.channelWritePcuCleanupType())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_DEFAULT);
+    assertThat(gcpProperties.channelWritePcuNamePrefix())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_PCU_NAME_PREFIX_DEFAULT);
+    assertThat(gcpProperties.channelWriteTemporaryPaths()).isNull();
+
+    GCPProperties customProperties =
+        new GCPProperties(
+            ImmutableMap.<String, String>builder()
+                .put(
+                    GCPProperties.GCS_KMS_KEY_NAME,
+                    "projects/p/locations/l/keyRings/r/cryptoKeys/k")
+                .put(GCPProperties.GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED, "true")
+                .put(
+                    GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE,
+                    GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE_PARALLEL_COMPOSITE_UPLOAD)
+                .put(GCPProperties.GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT, "4")
+                .put(
+                    GCPProperties.GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY,
+                    String.valueOf(64 * 1024 * 1024))
+                .put(
+                    GCPProperties.GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE,
+                    GCPProperties.GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ON_SUCCESS)
+                .put(GCPProperties.GCS_CHANNEL_WRITE_PCU_NAME_PREFIX, "iceberg-part-")
+                .put(GCPProperties.GCS_CHANNEL_WRITE_TEMPORARY_PATHS, "/tmp/dir1,/tmp/dir2")
+                .build());
+
+    assertThat(customProperties.kmsKeyName())
+        .isEqualTo("projects/p/locations/l/keyRings/r/cryptoKeys/k");
+    assertThat(customProperties.checksumValidationEnabled()).isTrue();
+    assertThat(customProperties.channelWriteUploadType())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE_PARALLEL_COMPOSITE_UPLOAD);
+    assertThat(customProperties.channelWritePcuBufferCount()).isEqualTo(4);
+    assertThat(customProperties.channelWritePcuBufferCapacity()).isEqualTo(64 * 1024 * 1024);
+    assertThat(customProperties.channelWritePcuCleanupType())
+        .isEqualTo(GCPProperties.GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ON_SUCCESS);
+    assertThat(customProperties.channelWritePcuNamePrefix()).isEqualTo("iceberg-part-");
+    assertThat(customProperties.channelWriteTemporaryPaths())
+        .containsExactly("/tmp/dir1", "/tmp/dir2");
+  }
+
+  @Test
+  void verifyKmsAndCmekMutualExclusivity() {
+    assertThatIllegalArgumentException()
+        .isThrownBy(
+            () ->
+                new GCPProperties(
+                    ImmutableMap.of(
+                        GCPProperties.GCS_ENCRYPTION_KEY,
+                        "csek-key",
+                        GCPProperties.GCS_KMS_KEY_NAME,
+                        "projects/p/locations/l/keyRings/r/cryptoKeys/k")))
+        .withMessage(
+            "Cannot configure both customer-supplied encryption key (%s) and KMS key (%s)",
+            GCPProperties.GCS_ENCRYPTION_KEY, GCPProperties.GCS_KMS_KEY_NAME);
+  }
+
+  @Test
+  void verifyKmsKeyNameGetterReturnsNull() {
+    GCPProperties properties = new GCPProperties();
+    assertThat(properties.kmsKeyName()).isNull();
+
+    GCPProperties propertiesWithEmptyMap = new GCPProperties(ImmutableMap.of());
+    assertThat(propertiesWithEmptyMap.kmsKeyName()).isNull();
   }
 }
