@@ -23,8 +23,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.google.cloud.WriteChannel;
@@ -45,9 +45,10 @@ import org.apache.iceberg.metrics.MetricsContext;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 
-class TestGcsOutputFile {
+public class TestGCSOutputFile {
 
   private static final String TEST_BUCKET = "test-bucket";
   private static final String KEY = "file/path/a.dat";
@@ -62,7 +63,7 @@ class TestGcsOutputFile {
   private BlobId blobId;
 
   @BeforeEach
-  void before() {
+  public void before() {
     storage = mock(Storage.class);
     gcsFileSystem = mock(GcsFileSystem.class);
     prefixedStorage = mock(PrefixedStorage.class);
@@ -77,7 +78,7 @@ class TestGcsOutputFile {
   }
 
   @Test
-  void fromLocation() {
+  public void fromLocation() {
     when(prefixedStorage.storage()).thenReturn(storage);
     when(prefixedStorage.gcsFileSystem()).thenReturn(gcsFileSystem);
     when(prefixedStorage.gcpProperties()).thenReturn(gcpProperties);
@@ -89,7 +90,7 @@ class TestGcsOutputFile {
   }
 
   @Test
-  void createThrowsAlreadyExistsException() {
+  public void createThrowsAlreadyExistsException() {
     when(storage.get(blobId)).thenReturn(blob);
 
     GCSOutputFile outputFile =
@@ -102,7 +103,7 @@ class TestGcsOutputFile {
   }
 
   @Test
-  void createWhenNotExistsSucceeds() throws IOException {
+  public void createWhenNotExistsSucceeds() throws IOException {
     when(storage.get(blobId)).thenReturn(null);
 
     GCSOutputFile outputFile =
@@ -115,7 +116,7 @@ class TestGcsOutputFile {
   }
 
   @Test
-  void createOrOverwriteSucceeds() throws IOException {
+  public void createOrOverwriteSucceeds() throws IOException {
     GCPProperties enabledProperties =
         new GCPProperties(ImmutableMap.of(GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true"));
     GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
@@ -145,22 +146,33 @@ class TestGcsOutputFile {
   }
 
   @Test
-  void fallbackToLegacyWhenAnalyticsDisabled() throws IOException {
+  public void fallbackToLegacyWhenAnalyticsDisabled() throws IOException {
     GCPProperties disabledProperties =
         new GCPProperties(ImmutableMap.of(GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "false"));
 
     GCSOutputFile outputFile =
         new GCSOutputFile(storage, gcsFileSystem, blobId, disabledProperties, metricsContext);
 
-    try (PositionOutputStream stream = outputFile.createOrOverwrite()) {
-      assertThat(stream).isInstanceOf(GCSOutputStream.class);
+    try (MockedConstruction<GCSOutputStream> mocked =
+        mockConstruction(
+            GCSOutputStream.class,
+            (mock, context) -> {
+              assertThat(context.arguments()).hasSize(4);
+              assertThat(context.arguments().get(0)).isEqualTo(storage);
+              assertThat(context.arguments().get(1)).isEqualTo(blobId);
+              assertThat(context.arguments().get(2)).isEqualTo(disabledProperties);
+              assertThat(context.arguments().get(3)).isEqualTo(metricsContext);
+            })) {
+      try (PositionOutputStream stream = outputFile.createOrOverwrite()) {
+        assertThat(stream).isInstanceOf(GCSOutputStream.class);
+        assertThat(mocked.constructed()).hasSize(1);
+      }
     }
-    verify(storage).writer(eq(BlobInfo.newBuilder(blobId).build()), any());
   }
 
   @Test
-  void fallbackToLegacyOnLinkageError() throws IOException {
-    GCPProperties enabledProperties =
+  public void createOrOverwriteAnalyticsCoreInitializationFailed() throws IOException {
+    GCPProperties enabledGcpProperties =
         new GCPProperties(ImmutableMap.of(GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true"));
     GcsItemId expectedItemId =
         GcsItemId.builder().setBucketName(TEST_BUCKET).setObjectName(KEY).build();
@@ -172,20 +184,35 @@ class TestGcsOutputFile {
               () ->
                   GoogleCloudStorageOutputStream.create(
                       eq(gcsFileSystem), eq(expectedItemId), any(GcsWriteOptions.class)))
-          .thenThrow(new NoClassDefFoundError("simulated missing class"));
+          .thenThrow(new IOException("GCS connector failed"));
 
       GCSOutputFile outputFile =
-          new GCSOutputFile(storage, gcsFileSystem, blobId, enabledProperties, metricsContext);
+          new GCSOutputFile(storage, gcsFileSystem, blobId, enabledGcpProperties, metricsContext);
 
-      try (PositionOutputStream stream = outputFile.createOrOverwrite()) {
+      try (MockedConstruction<GCSOutputStream> outputStreamMocked =
+          mockConstruction(
+              GCSOutputStream.class,
+              (mock, context) -> {
+                assertThat(context.arguments()).hasSize(4);
+                assertThat(context.arguments().get(0)).isEqualTo(storage);
+                assertThat(context.arguments().get(1)).isEqualTo(blobId);
+                assertThat(context.arguments().get(2)).isEqualTo(enabledGcpProperties);
+                assertThat(context.arguments().get(3)).isEqualTo(metricsContext);
+              })) {
+        PositionOutputStream stream = outputFile.createOrOverwrite();
         assertThat(stream).isInstanceOf(GCSOutputStream.class);
+        assertThat(outputStreamMocked.constructed()).hasSize(1);
+        mocked.verify(
+            () ->
+                GoogleCloudStorageOutputStream.create(
+                    eq(gcsFileSystem), eq(expectedItemId), any(GcsWriteOptions.class)));
+        stream.close();
       }
-      verify(storage).writer(eq(BlobInfo.newBuilder(blobId).build()), any());
     }
   }
 
   @Test
-  void toInputFile() {
+  public void toInputFile() {
     GCSOutputFile outputFile =
         new GCSOutputFile(storage, gcsFileSystem, blobId, gcpProperties, metricsContext);
     InputFile inputFile = outputFile.toInputFile();

@@ -315,12 +315,6 @@ public class GCPProperties implements Serializable {
     List<String> tempPaths =
         parseCommaSeparatedList(properties.get(GCS_CHANNEL_WRITE_TEMPORARY_PATHS), null);
     this.gcsChannelWriteTemporaryPaths = tempPaths != null ? ImmutableList.copyOf(tempPaths) : null;
-
-    Preconditions.checkArgument(
-        !(gcsEncryptionKey != null && gcsKmsKeyName != null),
-        "Cannot configure both customer-supplied encryption key (%s) and KMS key (%s)",
-        GCS_ENCRYPTION_KEY,
-        GCS_KMS_KEY_NAME);
   }
 
   public Optional<Integer> channelReadChunkSize() {

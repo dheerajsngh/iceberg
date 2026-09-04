@@ -23,7 +23,6 @@ import static org.apache.iceberg.gcp.GCPProperties.GCS_OAUTH2_REFRESH_CREDENTIAL
 import static org.apache.iceberg.gcp.GCPProperties.GCS_OAUTH2_REFRESH_CREDENTIALS_ENDPOINT;
 import static org.apache.iceberg.gcp.GCPProperties.GCS_OAUTH2_TOKEN;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatIllegalStateException;
 
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
@@ -80,7 +79,7 @@ public class TestGCPProperties {
   }
 
   @Test
-  void verifyChannelWritePropertiesDefaults() {
+  public void verifyChannelWritePropertiesDefaults() {
     GCPProperties gcpProperties = new GCPProperties();
     assertThat(gcpProperties.kmsKeyName()).isNull();
     assertThat(gcpProperties.checksumValidationEnabled())
@@ -133,23 +132,7 @@ public class TestGCPProperties {
   }
 
   @Test
-  void verifyKmsAndCmekMutualExclusivity() {
-    assertThatIllegalArgumentException()
-        .isThrownBy(
-            () ->
-                new GCPProperties(
-                    ImmutableMap.of(
-                        GCPProperties.GCS_ENCRYPTION_KEY,
-                        "csek-key",
-                        GCPProperties.GCS_KMS_KEY_NAME,
-                        "projects/p/locations/l/keyRings/r/cryptoKeys/k")))
-        .withMessage(
-            "Cannot configure both customer-supplied encryption key (%s) and KMS key (%s)",
-            GCPProperties.GCS_ENCRYPTION_KEY, GCPProperties.GCS_KMS_KEY_NAME);
-  }
-
-  @Test
-  void verifyKmsKeyNameGetterReturnsNull() {
+  public void verifyKmsKeyNameGetterReturnsNull() {
     GCPProperties properties = new GCPProperties();
     assertThat(properties.kmsKeyName()).isNull();
 

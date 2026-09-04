@@ -76,7 +76,7 @@ class GCSOutputFile extends BaseGCSFile implements OutputFile {
       try {
         return AnalyticsCoreUtil.newOutputStream(
             gcsFileSystem(), blobId(), gcpProperties(), metrics());
-      } catch (LinkageError | IOException e) {
+      } catch (IOException e) {
         LOG.error(
             "Failed to create GCS analytics core output stream for {}, falling back to default.",
             uri(),

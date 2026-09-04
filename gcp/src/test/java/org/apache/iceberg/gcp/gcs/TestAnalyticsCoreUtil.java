@@ -246,7 +246,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  void writeOptionsConfiguration() throws IOException {
+  public void writeOptionsConfiguration() throws IOException {
     GcsFileSystem fileSystem = mock(GcsFileSystem.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
     GcsItemId expectedItemId =
@@ -322,7 +322,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  void streamPositionAndMetricsTracking() throws IOException {
+  public void streamPositionAndMetricsTracking() throws IOException {
     GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
 
@@ -369,7 +369,7 @@ public class TestAnalyticsCoreUtil {
 
   @SuppressWarnings({"deprecation", "checkstyle:NoFinalizer", "Finalize"})
   @Test
-  void leakDetectionStackTraceLogged() throws Exception {
+  public void leakDetectionStackTraceLogged() throws Exception {
     GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
 
@@ -409,7 +409,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  void enumNormalizationAndGuardrailValidation() {
+  public void enumNormalizationAndGuardrailValidation() {
     assertThat(AnalyticsCoreUtil.parseUploadType("chunk-upload"))
         .isEqualTo(GcsClientOptions.UploadType.CHUNK_UPLOAD);
     assertThat(AnalyticsCoreUtil.parseUploadType(" PARALLEL_COMPOSITE_UPLOAD "))
@@ -436,7 +436,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  void createFileSystemValidatesWriteProperties() {
+  public void createFileSystemValidatesWriteProperties() {
     Map<String, String> invalidUploadType =
         ImmutableMap.of(
             GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true",
