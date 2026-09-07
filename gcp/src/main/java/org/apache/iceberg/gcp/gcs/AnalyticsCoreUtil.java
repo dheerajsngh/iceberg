@@ -319,7 +319,6 @@ class AnalyticsCoreUtil {
     private final Counter writeBytes;
     private final Counter writeOperations;
 
-    private long pos = 0;
     private volatile boolean closed = false;
 
     GcsOutputStreamWrapper(
@@ -336,13 +335,12 @@ class AnalyticsCoreUtil {
 
     @Override
     public synchronized long getPos() {
-      return pos;
+      return stream.getBytesWritten();
     }
 
     @Override
     public synchronized void write(int b) throws IOException {
       stream.write(b);
-      pos += 1;
       writeBytes.increment();
       writeOperations.increment();
     }
@@ -350,7 +348,6 @@ class AnalyticsCoreUtil {
     @Override
     public synchronized void write(byte[] b, int off, int len) throws IOException {
       stream.write(b, off, len);
-      pos += len;
       writeBytes.increment(len);
       writeOperations.increment();
     }

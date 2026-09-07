@@ -34,6 +34,7 @@ import com.google.cloud.storage.Storage;
 import com.google.cloud.storage.StorageOptions;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.List;
 import java.util.Random;
@@ -284,11 +285,10 @@ public class TestGcsFileIO {
             "true",
             GCPProperties.GCS_SERVICE_HOST,
             String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
-
     byte[] expected = new byte[2 * 1024 * 1024];
     RANDOM.nextBytes(expected);
-
     OutputFile out = fileIO.newOutputFile(location);
+
     try (PositionOutputStream stream = out.createOrOverwrite()) {
       stream.write(expected);
       assertThat(stream.getPos()).isEqualTo(expected.length);
@@ -306,8 +306,36 @@ public class TestGcsFileIO {
   }
 
   @Test
-  void chunkedUploadCommit() throws IOException {
-    String location = String.format("gs://%s/path/to/chunked-upload.dat", BUCKET);
+  void writeSingleByteWithAnalyticsCore() throws IOException {
+    String location = String.format("gs://%s/path/to/single-byte.dat", BUCKET);
+    fileIO.initialize(
+        ImmutableMap.of(
+            GCPProperties.GCS_ANALYTICS_CORE_ENABLED,
+            "true",
+            GCPProperties.GCS_NO_AUTH,
+            "true",
+            GCPProperties.GCS_SERVICE_HOST,
+            String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
+    OutputFile out = fileIO.newOutputFile(location);
+
+    try (PositionOutputStream stream = out.create()) {
+      stream.write(42);
+      assertThat(stream.getPos()).isEqualTo(1L);
+    }
+
+    InputFile in = fileIO.newInputFile(location);
+    assertThat(in.exists()).isTrue();
+    assertThat(in.getLength()).isEqualTo(1L);
+
+    try (InputStream stream = in.newStream()) {
+      assertThat(stream.read()).isEqualTo(42);
+      assertThat(stream.read()).isEqualTo(-1);
+    }
+  }
+
+  @Test
+  void writeMultiChunkCommitAtomicity() throws IOException {
+    String location = String.format("gs://%s/path/to/multi-chunk.dat", BUCKET);
     fileIO.initialize(
         ImmutableMap.of(
             GCPProperties.GCS_ANALYTICS_CORE_ENABLED,
@@ -318,58 +346,76 @@ public class TestGcsFileIO {
             "true",
             GCPProperties.GCS_SERVICE_HOST,
             String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
-
-    byte[] expected = new byte[1024 * 1024];
-    RANDOM.nextBytes(expected);
-
+    byte[] chunk1 = new byte[256 * 1024];
+    byte[] chunk2 = new byte[256 * 1024];
+    RANDOM.nextBytes(chunk1);
+    RANDOM.nextBytes(chunk2);
     OutputFile out = fileIO.newOutputFile(location);
+    InputFile in = fileIO.newInputFile(location);
+
     try (PositionOutputStream stream = out.create()) {
-      stream.write(expected);
-      assertThat(stream.getPos()).isEqualTo(expected.length);
+      stream.write(chunk1);
+      assertThat(stream.getPos()).isEqualTo(chunk1.length);
+      assertThat(in.exists()).as("File should not be visible before commit").isFalse();
+
+      stream.write(chunk2);
+      assertThat(stream.getPos()).isEqualTo(chunk1.length + chunk2.length);
+      assertThat(in.exists()).as("File should still not be visible before close").isFalse();
     }
 
-    InputFile in = fileIO.newInputFile(location);
-    assertThat(in.exists()).isTrue();
-    assertThat(in.getLength()).isEqualTo(expected.length);
+    assertThat(in.exists()).as("File should be visible after stream is closed").isTrue();
+    assertThat(in.getLength()).isEqualTo(chunk1.length + chunk2.length);
 
     try (InputStream stream = in.newStream()) {
-      byte[] actual = new byte[expected.length];
-      IOUtil.readFully(stream, actual, 0, expected.length);
+      byte[] actual = new byte[chunk1.length + chunk2.length];
+      IOUtil.readFully(stream, actual, 0, actual.length);
+      byte[] expected = ByteBuffer.allocate(actual.length).put(chunk1).put(chunk2).array();
       assertThat(actual).isEqualTo(expected);
     }
   }
 
   @Test
-  void writeWithChecksumValidation() throws IOException {
-    String location = String.format("gs://%s/path/to/checksum-write.dat", BUCKET);
+  void overwriteExistingFileWithAnalyticsCore() throws IOException {
+    String location = String.format("gs://%s/path/to/overwrite.dat", BUCKET);
     fileIO.initialize(
         ImmutableMap.of(
             GCPProperties.GCS_ANALYTICS_CORE_ENABLED,
-            "true",
-            GCPProperties.GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED,
             "true",
             GCPProperties.GCS_NO_AUTH,
             "true",
             GCPProperties.GCS_SERVICE_HOST,
             String.format("http://localhost:%d", GCS_EMULATOR_PORT)));
-
-    byte[] expected = new byte[512 * 1024];
-    RANDOM.nextBytes(expected);
-
+    byte[] initialContent = new byte[1024];
+    RANDOM.nextBytes(initialContent);
     OutputFile out = fileIO.newOutputFile(location);
-    try (PositionOutputStream stream = out.createOrOverwrite()) {
-      stream.write(expected);
-      assertThat(stream.getPos()).isEqualTo(expected.length);
+
+    try (PositionOutputStream stream = out.create()) {
+      stream.write(initialContent);
     }
 
     InputFile in = fileIO.newInputFile(location);
-    assertThat(in.exists()).isTrue();
-    assertThat(in.getLength()).isEqualTo(expected.length);
+    assertThat(in.getLength()).isEqualTo(initialContent.length);
 
     try (InputStream stream = in.newStream()) {
-      byte[] actual = new byte[expected.length];
-      IOUtil.readFully(stream, actual, 0, expected.length);
-      assertThat(actual).isEqualTo(expected);
+      byte[] actual = new byte[initialContent.length];
+      IOUtil.readFully(stream, actual, 0, initialContent.length);
+      assertThat(actual).isEqualTo(initialContent);
+    }
+
+    byte[] overwrittenContent = new byte[2048];
+    RANDOM.nextBytes(overwrittenContent);
+
+    try (PositionOutputStream stream = out.createOrOverwrite()) {
+      stream.write(overwrittenContent);
+    }
+
+    InputFile updated = fileIO.newInputFile(location);
+    assertThat(updated.getLength()).isEqualTo(overwrittenContent.length);
+
+    try (InputStream stream = updated.newStream()) {
+      byte[] actual = new byte[overwrittenContent.length];
+      IOUtil.readFully(stream, actual, 0, overwrittenContent.length);
+      assertThat(actual).isEqualTo(overwrittenContent);
     }
   }
 }

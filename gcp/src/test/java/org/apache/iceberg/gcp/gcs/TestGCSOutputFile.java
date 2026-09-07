@@ -48,7 +48,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 
-public class TestGCSOutputFile {
+class TestGCSOutputFile {
 
   private static final String TEST_BUCKET = "test-bucket";
   private static final String KEY = "file/path/a.dat";
@@ -63,7 +63,7 @@ public class TestGCSOutputFile {
   private BlobId blobId;
 
   @BeforeEach
-  public void before() {
+  void before() {
     storage = mock(Storage.class);
     gcsFileSystem = mock(GcsFileSystem.class);
     prefixedStorage = mock(PrefixedStorage.class);
@@ -78,19 +78,20 @@ public class TestGCSOutputFile {
   }
 
   @Test
-  public void fromLocation() {
+  void fromLocationInitializesBlobIdAndLocation() {
     when(prefixedStorage.storage()).thenReturn(storage);
     when(prefixedStorage.gcsFileSystem()).thenReturn(gcsFileSystem);
     when(prefixedStorage.gcpProperties()).thenReturn(gcpProperties);
 
     GCSOutputFile outputFile =
         GCSOutputFile.fromLocation(LOCATION, prefixedStorage, metricsContext);
+
     assertThat(outputFile.blobId()).isEqualTo(blobId);
     assertThat(outputFile.location()).isEqualTo(LOCATION);
   }
 
   @Test
-  public void createThrowsAlreadyExistsException() {
+  void createWhenExistsThrowsAlreadyExistsException() {
     when(storage.get(blobId)).thenReturn(blob);
 
     GCSOutputFile outputFile =
@@ -103,7 +104,7 @@ public class TestGCSOutputFile {
   }
 
   @Test
-  public void createWhenNotExistsSucceeds() throws IOException {
+  void createWhenDoesNotExistSucceeds() throws IOException {
     when(storage.get(blobId)).thenReturn(null);
 
     GCSOutputFile outputFile =
@@ -116,13 +117,12 @@ public class TestGCSOutputFile {
   }
 
   @Test
-  public void createOrOverwriteSucceeds() throws IOException {
+  void createOrOverwriteWhenAnalyticsCoreEnabledReturnsAnalyticsCoreStream() throws IOException {
     GCPProperties enabledProperties =
         new GCPProperties(ImmutableMap.of(GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true"));
     GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
     GcsItemId expectedItemId =
         GcsItemId.builder().setBucketName(TEST_BUCKET).setObjectName(KEY).build();
-
     try (MockedStatic<GoogleCloudStorageOutputStream> mocked =
         mockStatic(GoogleCloudStorageOutputStream.class)) {
       mocked
@@ -131,11 +131,11 @@ public class TestGCSOutputFile {
                   GoogleCloudStorageOutputStream.create(
                       eq(gcsFileSystem), eq(expectedItemId), any(GcsWriteOptions.class)))
           .thenReturn(mockStream);
-
       GCSOutputFile outputFile =
           new GCSOutputFile(storage, gcsFileSystem, blobId, enabledProperties, metricsContext);
 
       try (PositionOutputStream stream = outputFile.createOrOverwrite()) {
+        assertThat(stream).isNotInstanceOf(GCSOutputStream.class);
         assertThat(stream).isInstanceOf(AnalyticsCoreUtil.GcsOutputStreamWrapper.class);
       }
       mocked.verify(
@@ -146,10 +146,9 @@ public class TestGCSOutputFile {
   }
 
   @Test
-  public void fallbackToLegacyWhenAnalyticsDisabled() throws IOException {
+  void createOrOverwriteWhenAnalyticsCoreDisabledReturnsGcsOutputStream() throws IOException {
     GCPProperties disabledProperties =
         new GCPProperties(ImmutableMap.of(GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "false"));
-
     GCSOutputFile outputFile =
         new GCSOutputFile(storage, gcsFileSystem, blobId, disabledProperties, metricsContext);
 
@@ -164,6 +163,7 @@ public class TestGCSOutputFile {
               assertThat(context.arguments().get(3)).isEqualTo(metricsContext);
             })) {
       try (PositionOutputStream stream = outputFile.createOrOverwrite()) {
+        assertThat(stream).isNotInstanceOf(AnalyticsCoreUtil.GcsOutputStreamWrapper.class);
         assertThat(stream).isInstanceOf(GCSOutputStream.class);
         assertThat(mocked.constructed()).hasSize(1);
       }
@@ -171,7 +171,7 @@ public class TestGCSOutputFile {
   }
 
   @Test
-  public void createOrOverwriteAnalyticsCoreInitializationFailed() throws IOException {
+  void createOrOverwriteFallsBackToGcsOutputStreamWhenAnalyticsCoreFails() throws IOException {
     GCPProperties enabledGcpProperties =
         new GCPProperties(ImmutableMap.of(GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true"));
     GcsItemId expectedItemId =
@@ -184,7 +184,7 @@ public class TestGCSOutputFile {
               () ->
                   GoogleCloudStorageOutputStream.create(
                       eq(gcsFileSystem), eq(expectedItemId), any(GcsWriteOptions.class)))
-          .thenThrow(new IOException("GCS connector failed"));
+          .thenThrow(new IOException("Analytics Core initialization failed"));
 
       GCSOutputFile outputFile =
           new GCSOutputFile(storage, gcsFileSystem, blobId, enabledGcpProperties, metricsContext);
@@ -212,7 +212,7 @@ public class TestGCSOutputFile {
   }
 
   @Test
-  public void toInputFile() {
+  void toInputFileReturnsGcsInputFileWithSameLocation() {
     GCSOutputFile outputFile =
         new GCSOutputFile(storage, gcsFileSystem, blobId, gcpProperties, metricsContext);
     InputFile inputFile = outputFile.toInputFile();
