@@ -19,6 +19,7 @@
 package org.apache.iceberg.gcp.gcs;
 
 import com.google.auth.Credentials;
+import com.google.cloud.gcs.analyticscore.client.GcsClientOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsFileInfo;
 import com.google.cloud.gcs.analyticscore.client.GcsFileSystem;
 import com.google.cloud.gcs.analyticscore.client.GcsFileSystemImpl;
@@ -26,26 +27,34 @@ import com.google.cloud.gcs.analyticscore.client.GcsFileSystemOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsItemInfo;
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
+import com.google.cloud.gcs.analyticscore.client.GcsWriteOptions;
 import com.google.cloud.gcs.analyticscore.core.GcsAnalyticsCoreOptions;
 import com.google.cloud.gcs.analyticscore.core.GoogleCloudStorageInputStream;
+import com.google.cloud.gcs.analyticscore.core.GoogleCloudStorageOutputStream;
 import com.google.cloud.storage.BlobId;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.IntFunction;
 import java.util.stream.Collectors;
 import org.apache.iceberg.gcp.GCPProperties;
 import org.apache.iceberg.io.FileIOMetricsContext;
 import org.apache.iceberg.io.FileRange;
+import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.metrics.Counter;
 import org.apache.iceberg.metrics.MetricsContext;
+import org.apache.iceberg.relocated.com.google.common.base.Joiner;
 import org.apache.iceberg.relocated.com.google.common.base.Preconditions;
 import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.util.PropertyUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Gateway to the optional {@code com.google.cloud.gcs.analyticscore.*} dependency. All references
@@ -61,6 +70,17 @@ class AnalyticsCoreUtil {
         PropertyUtil.propertyAsBoolean(properties, GCPProperties.GCS_ANALYTICS_CORE_ENABLED, false),
         "GCS analytics-core is disabled; %s must be set to true",
         GCPProperties.GCS_ANALYTICS_CORE_ENABLED);
+
+    String uploadType = properties.get(GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE);
+    if (uploadType != null) {
+      parseUploadType(uploadType);
+    }
+
+    String cleanupType = properties.get(GCPProperties.GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE);
+    if (cleanupType != null) {
+      parseCleanupType(cleanupType);
+    }
+
     GcsAnalyticsCoreOptions options = new GcsAnalyticsCoreOptions("gcs.", properties);
     GcsFileSystemOptions fileSystemOptions = options.getGcsFileSystemOptions();
     return credentials == null
@@ -79,6 +99,54 @@ class AnalyticsCoreUtil {
             : GoogleCloudStorageInputStream.create(
                 fileSystem, gcsFileInfo(blobId, itemId, blobSize));
     return new GcsInputStreamWrapper(stream, blobId, metrics);
+  }
+
+  static PositionOutputStream newOutputStream(
+      AutoCloseable fileSystemHandle,
+      BlobId blobId,
+      GCPProperties gcpProperties,
+      MetricsContext metrics)
+      throws IOException {
+    GcsFileSystem fileSystem = (GcsFileSystem) fileSystemHandle;
+    GcsItemId itemId = gcsItemId(blobId);
+
+    GcsWriteOptions.Builder writeOptionsBuilder =
+        GcsWriteOptions.builder()
+            .setChecksumValidationEnabled(gcpProperties.checksumValidationEnabled());
+
+    if (gcpProperties.kmsKeyName() != null) {
+      writeOptionsBuilder.setKmsKeyName(gcpProperties.kmsKeyName());
+    }
+    gcpProperties.encryptionKey().ifPresent(writeOptionsBuilder::setEncryptionKey);
+    gcpProperties.userProject().ifPresent(writeOptionsBuilder::setUserProject);
+
+    GoogleCloudStorageOutputStream stream =
+        GoogleCloudStorageOutputStream.create(fileSystem, itemId, writeOptionsBuilder.build());
+
+    return new GcsOutputStreamWrapper(stream, blobId, metrics);
+  }
+
+  private static <E extends Enum<E>> E parseEnum(
+      String value, Class<E> enumClass, String propertyDescription) {
+    Preconditions.checkArgument(value != null, "%s cannot be null", propertyDescription);
+    String normalized = value.trim().replace('-', '_').toUpperCase(Locale.ROOT);
+    try {
+      return Enum.valueOf(enumClass, normalized);
+    } catch (IllegalArgumentException e) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Invalid %s: '%s'. Expected one of: %s",
+              propertyDescription, value, Arrays.toString(enumClass.getEnumConstants())));
+    }
+  }
+
+  static GcsClientOptions.UploadType parseUploadType(String uploadType) {
+    return parseEnum(uploadType, GcsClientOptions.UploadType.class, "upload type");
+  }
+
+  static GcsClientOptions.PartFileCleanupType parseCleanupType(String cleanupType) {
+    return parseEnum(
+        cleanupType, GcsClientOptions.PartFileCleanupType.class, "part-file cleanup type");
   }
 
   static void close(AutoCloseable fileSystemHandle) {
@@ -239,6 +307,80 @@ class AnalyticsCoreUtil {
     @Override
     public void close() throws IOException {
       stream.close();
+    }
+  }
+
+  static class GcsOutputStreamWrapper extends PositionOutputStream {
+    private static final Logger LOG = LoggerFactory.getLogger(GcsOutputStreamWrapper.class);
+
+    private final StackTraceElement[] createStack;
+    private final GoogleCloudStorageOutputStream stream;
+    private final BlobId blobId;
+    private final Counter writeBytes;
+    private final Counter writeOperations;
+
+    private volatile boolean closed = false;
+
+    GcsOutputStreamWrapper(
+        GoogleCloudStorageOutputStream stream, BlobId blobId, MetricsContext metrics) {
+      Preconditions.checkArgument(null != stream, "Invalid stream: null");
+      Preconditions.checkArgument(null != blobId, "Invalid blobId: null");
+      this.stream = stream;
+      this.blobId = blobId;
+      this.createStack = Thread.currentThread().getStackTrace();
+      this.writeBytes =
+          metrics.counter(FileIOMetricsContext.WRITE_BYTES, MetricsContext.Unit.BYTES);
+      this.writeOperations = metrics.counter(FileIOMetricsContext.WRITE_OPERATIONS);
+    }
+
+    @Override
+    public synchronized long getPos() {
+      return stream.getBytesWritten();
+    }
+
+    @Override
+    public synchronized void write(int b) throws IOException {
+      stream.write(b);
+      writeBytes.increment();
+      writeOperations.increment();
+    }
+
+    @Override
+    public synchronized void write(byte[] b, int off, int len) throws IOException {
+      stream.write(b, off, len);
+      writeBytes.increment(len);
+      writeOperations.increment();
+    }
+
+    @Override
+    public void close() throws IOException {
+      if (closed) {
+        return;
+      }
+
+      synchronized (this) {
+        if (!closed) {
+          closed = true;
+          super.close();
+          stream.close();
+        }
+      }
+    }
+
+    @SuppressWarnings({"checkstyle:NoFinalizer", "Finalize", "deprecation"})
+    @Override
+    protected void finalize() throws Throwable {
+      super.finalize();
+      if (!closed) {
+        try {
+          close();
+        } catch (Throwable t) {
+          LOG.warn("Failed to close unclosed stream for {} in finalizer", blobId.toGsUtilUri(), t);
+        }
+        String trace =
+            Joiner.on("\n\t").join(Arrays.copyOfRange(createStack, 1, createStack.length));
+        LOG.warn("Unclosed output stream for {} created by:\n\t{}", blobId.toGsUtilUri(), trace);
+      }
     }
   }
 }

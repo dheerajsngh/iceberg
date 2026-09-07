@@ -19,38 +19,50 @@
 package org.apache.iceberg.gcp.gcs;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.google.cloud.gcs.analyticscore.client.GcsClientOptions;
 import com.google.cloud.gcs.analyticscore.client.GcsFileSystem;
 import com.google.cloud.gcs.analyticscore.client.GcsItemId;
 import com.google.cloud.gcs.analyticscore.client.GcsObjectRange;
+import com.google.cloud.gcs.analyticscore.client.GcsWriteOptions;
 import com.google.cloud.gcs.analyticscore.core.GoogleCloudStorageInputStream;
+import com.google.cloud.gcs.analyticscore.core.GoogleCloudStorageOutputStream;
 import com.google.cloud.storage.BlobId;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.IntFunction;
+import org.apache.iceberg.gcp.GCPProperties;
 import org.apache.iceberg.io.FileIOMetricsContext;
 import org.apache.iceberg.io.FileRange;
+import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.metrics.CachingMetricsContext;
 import org.apache.iceberg.metrics.Counter;
 import org.apache.iceberg.metrics.MetricsContext;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 
-public class TestAnalyticsCoreUtil {
+class TestAnalyticsCoreUtil {
 
   @Test
-  public void readVectored() throws IOException {
+  void readVectored() throws IOException {
     GcsFileSystem fileSystem = mock(GcsFileSystem.class);
     GoogleCloudStorageInputStream gcsInputStream = mock(GoogleCloudStorageInputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
@@ -88,7 +100,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  public void readVectoredCountsRequestedLengthSynchronously() throws IOException {
+  void readVectoredCountsRequestedLengthSynchronously() throws IOException {
     GcsFileSystem fileSystem = mock(GcsFileSystem.class);
     GoogleCloudStorageInputStream gcsInputStream = mock(GoogleCloudStorageInputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
@@ -133,7 +145,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  public void readDoesNotCountAtEof() throws IOException {
+  void readDoesNotCountAtEof() throws IOException {
     GcsFileSystem fileSystem = mock(GcsFileSystem.class);
     GoogleCloudStorageInputStream gcsInputStream = mock(GoogleCloudStorageInputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
@@ -170,7 +182,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  public void readVectoredSkipsZeroLengthRanges() throws IOException {
+  void readVectoredSkipsZeroLengthRanges() throws IOException {
     GcsFileSystem fileSystem = mock(GcsFileSystem.class);
     GoogleCloudStorageInputStream gcsInputStream = mock(GoogleCloudStorageInputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
@@ -201,7 +213,7 @@ public class TestAnalyticsCoreUtil {
   }
 
   @Test
-  public void readTailDoesNotCountAtEof() throws IOException {
+  void readTailDoesNotCountAtEof() throws IOException {
     GcsFileSystem fileSystem = mock(GcsFileSystem.class);
     GoogleCloudStorageInputStream gcsInputStream = mock(GoogleCloudStorageInputStream.class);
     BlobId blobId = BlobId.of("mockbucket", "mockname");
@@ -231,5 +243,247 @@ public class TestAnalyticsCoreUtil {
     assertThat(((RangeReadable) stream).readTail(new byte[16], 0, 16)).isEqualTo(-1);
     assertThat(readBytes.value()).isEqualTo(8);
     assertThat(readOperations.value()).isEqualTo(1);
+  }
+
+  @Test
+  void outputStreamWithKmsConfiguresWriteOptions() throws IOException {
+    GcsFileSystem fileSystem = mock(GcsFileSystem.class);
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+    GcsItemId expectedItemId =
+        GcsItemId.builder().setBucketName("mockbucket").setObjectName("mockname").build();
+    GCPProperties properties =
+        new GCPProperties(
+            ImmutableMap.<String, String>builder()
+                .put(
+                    GCPProperties.GCS_KMS_KEY_NAME,
+                    "projects/p/locations/l/keyRings/r/cryptoKeys/k")
+                .put(GCPProperties.GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED, "true")
+                .put(GCPProperties.GCS_USER_PROJECT, "my-user-project")
+                .build());
+    GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
+    ArgumentCaptor<GcsWriteOptions> optionsCaptor = ArgumentCaptor.forClass(GcsWriteOptions.class);
+    try (MockedStatic<GoogleCloudStorageOutputStream> mocked =
+        mockStatic(GoogleCloudStorageOutputStream.class)) {
+      mocked
+          .when(
+              () ->
+                  GoogleCloudStorageOutputStream.create(
+                      eq(fileSystem), eq(expectedItemId), optionsCaptor.capture()))
+          .thenReturn(mockStream);
+
+      PositionOutputStream outputStream =
+          AnalyticsCoreUtil.newOutputStream(
+              fileSystem, blobId, properties, MetricsContext.nullMetrics());
+
+      assertThat(outputStream).isNotNull();
+      GcsWriteOptions captured = optionsCaptor.getValue();
+      assertThat(captured.isOverwriteExisting()).isTrue();
+      assertThat(captured.isDisableGzipContent()).isTrue();
+      assertThat(captured.isChecksumValidationEnabled()).isTrue();
+      assertThat(captured.getKmsKeyName())
+          .contains("projects/p/locations/l/keyRings/r/cryptoKeys/k");
+      assertThat(captured.getUserProject()).contains("my-user-project");
+      assertThat(captured.getEncryptionKey()).isEmpty();
+    }
+  }
+
+  @Test
+  void outputStreamWithCsekConfiguresWriteOptions() throws IOException {
+    GcsFileSystem fileSystem = mock(GcsFileSystem.class);
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+    GcsItemId expectedItemId =
+        GcsItemId.builder().setBucketName("mockbucket").setObjectName("mockname").build();
+    GCPProperties csekProperties =
+        new GCPProperties(
+            ImmutableMap.of(
+                GCPProperties.GCS_ENCRYPTION_KEY,
+                "csek-key",
+                GCPProperties.GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED,
+                "false"));
+    GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
+    ArgumentCaptor<GcsWriteOptions> optionsCaptor = ArgumentCaptor.forClass(GcsWriteOptions.class);
+    try (MockedStatic<GoogleCloudStorageOutputStream> mocked =
+        mockStatic(GoogleCloudStorageOutputStream.class)) {
+      mocked
+          .when(
+              () ->
+                  GoogleCloudStorageOutputStream.create(
+                      eq(fileSystem), eq(expectedItemId), optionsCaptor.capture()))
+          .thenReturn(mockStream);
+
+      PositionOutputStream outputStream =
+          AnalyticsCoreUtil.newOutputStream(
+              fileSystem, blobId, csekProperties, MetricsContext.nullMetrics());
+
+      assertThat(outputStream).isNotNull();
+      GcsWriteOptions captured = optionsCaptor.getValue();
+      assertThat(captured.isOverwriteExisting()).isTrue();
+      assertThat(captured.isDisableGzipContent()).isTrue();
+      assertThat(captured.isChecksumValidationEnabled()).isFalse();
+      assertThat(captured.getEncryptionKey()).contains("csek-key");
+      assertThat(captured.getKmsKeyName()).isEmpty();
+    }
+  }
+
+  @Test
+  void outputStreamDelegatesPositionAndStoredLength() throws IOException {
+    GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+
+    PositionOutputStream stream =
+        new AnalyticsCoreUtil.GcsOutputStreamWrapper(
+            mockStream, blobId, MetricsContext.nullMetrics());
+
+    when(mockStream.getBytesWritten()).thenReturn(0L);
+    assertThat(stream.getPos()).isEqualTo(0L);
+    assertThat(stream.storedLength()).isEqualTo(0L);
+
+    when(mockStream.getBytesWritten()).thenReturn(42L);
+    assertThat(stream.getPos()).isEqualTo(42L);
+    assertThat(stream.storedLength()).isEqualTo(42L);
+
+    verify(mockStream, times(4)).getBytesWritten();
+  }
+
+  @Test
+  void outputStreamWritesUpdateMetrics() throws IOException {
+    GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+    MetricsContext metrics = mock(MetricsContext.class);
+    Counter writeBytes = mock(Counter.class);
+    Counter writeOperations = mock(Counter.class);
+    when(metrics.counter(FileIOMetricsContext.WRITE_BYTES, MetricsContext.Unit.BYTES))
+        .thenReturn(writeBytes);
+    when(metrics.counter(FileIOMetricsContext.WRITE_OPERATIONS)).thenReturn(writeOperations);
+
+    PositionOutputStream stream =
+        new AnalyticsCoreUtil.GcsOutputStreamWrapper(mockStream, blobId, metrics);
+
+    stream.write(42);
+    verify(mockStream).write(42);
+    verify(writeBytes).increment();
+    verify(writeOperations, times(1)).increment();
+
+    byte[] bytes = new byte[] {1, 2, 3, 4, 5};
+    stream.write(bytes, 1, 3);
+    verify(mockStream).write(bytes, 1, 3);
+    verify(writeBytes).increment(3);
+    verify(writeOperations, times(2)).increment();
+
+    stream.write(new byte[] {6, 7});
+    verify(mockStream).write(new byte[] {6, 7}, 0, 2);
+    verify(writeBytes).increment(2);
+    verify(writeOperations, times(3)).increment();
+  }
+
+  @Test
+  void outputStreamCloseIsIdempotent() throws IOException {
+    GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+
+    PositionOutputStream stream =
+        new AnalyticsCoreUtil.GcsOutputStreamWrapper(
+            mockStream, blobId, MetricsContext.nullMetrics());
+
+    stream.close();
+    verify(mockStream).close();
+
+    // Verify close is idempotent
+    stream.close();
+    verify(mockStream, times(1)).close();
+  }
+
+  @SuppressWarnings({"deprecation", "checkstyle:NoFinalizer", "Finalize"})
+  @Test
+  void unclosedOutputStreamFinalizeClosesStream() throws Exception {
+    GoogleCloudStorageOutputStream mockStream = mock(GoogleCloudStorageOutputStream.class);
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+    AnalyticsCoreUtil.GcsOutputStreamWrapper stream =
+        new AnalyticsCoreUtil.GcsOutputStreamWrapper(
+            mockStream, blobId, MetricsContext.nullMetrics());
+
+    // When finalize is called on unclosed stream, it should close the stream
+    try {
+      stream.finalize();
+    } catch (Throwable t) {
+      throw new RuntimeException(t);
+    }
+
+    verify(mockStream).close();
+    // Calling close again should be a no-op since it was closed by finalizer
+    stream.close();
+    verify(mockStream, times(1)).close();
+  }
+
+  @SuppressWarnings({"deprecation", "checkstyle:NoFinalizer", "Finalize"})
+  @Test
+  void outputStreamFinalizeDoesNotThrowOnCloseFailure() throws Exception {
+    BlobId blobId = BlobId.of("mockbucket", "mockname");
+    GoogleCloudStorageOutputStream failingStream = mock(GoogleCloudStorageOutputStream.class);
+    doThrow(new IOException("close failed")).when(failingStream).close();
+    AnalyticsCoreUtil.GcsOutputStreamWrapper failingWrapper =
+        new AnalyticsCoreUtil.GcsOutputStreamWrapper(
+            failingStream, blobId, MetricsContext.nullMetrics());
+
+    assertThatCode(
+            () -> {
+              try {
+                failingWrapper.finalize();
+              } catch (Throwable t) {
+                throw new RuntimeException(t);
+              }
+            })
+        .doesNotThrowAnyException();
+    verify(failingStream).close();
+  }
+
+  @Test
+  void parseEnumsNormalizesValidValuesAndRejectsInvalid() {
+    assertThat(AnalyticsCoreUtil.parseUploadType("chunk-upload"))
+        .isEqualTo(GcsClientOptions.UploadType.CHUNK_UPLOAD);
+    assertThat(AnalyticsCoreUtil.parseUploadType(" PARALLEL_COMPOSITE_UPLOAD "))
+        .isEqualTo(GcsClientOptions.UploadType.PARALLEL_COMPOSITE_UPLOAD);
+    assertThat(AnalyticsCoreUtil.parseUploadType("write_to_disk_then_upload"))
+        .isEqualTo(GcsClientOptions.UploadType.WRITE_TO_DISK_THEN_UPLOAD);
+
+    assertThat(AnalyticsCoreUtil.parseCleanupType("always"))
+        .isEqualTo(GcsClientOptions.PartFileCleanupType.ALWAYS);
+    assertThat(AnalyticsCoreUtil.parseCleanupType(" on-success "))
+        .isEqualTo(GcsClientOptions.PartFileCleanupType.ON_SUCCESS);
+    assertThat(AnalyticsCoreUtil.parseCleanupType("NEVER"))
+        .isEqualTo(GcsClientOptions.PartFileCleanupType.NEVER);
+
+    assertThatThrownBy(() -> AnalyticsCoreUtil.parseUploadType("invalid-upload-type"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Invalid upload type: 'invalid-upload-type'")
+        .hasMessageContaining("CHUNK_UPLOAD");
+
+    assertThatThrownBy(() -> AnalyticsCoreUtil.parseCleanupType("invalid-cleanup"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Invalid part-file cleanup type: 'invalid-cleanup'")
+        .hasMessageContaining("ALWAYS");
+  }
+
+  @Test
+  void createFileSystemRejectsInvalidWriteProperties() {
+    Map<String, String> invalidUploadType =
+        ImmutableMap.of(
+            GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true",
+            GCPProperties.GCS_CHANNEL_WRITE_UPLOAD_TYPE, "invalid-type");
+
+    assertThatThrownBy(() -> AnalyticsCoreUtil.createFileSystem(invalidUploadType, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Invalid upload type: 'invalid-type'")
+        .hasMessageContaining("CHUNK_UPLOAD");
+
+    Map<String, String> invalidCleanupType =
+        ImmutableMap.of(
+            GCPProperties.GCS_ANALYTICS_CORE_ENABLED, "true",
+            GCPProperties.GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE, "bad-cleanup");
+
+    assertThatThrownBy(() -> AnalyticsCoreUtil.createFileSystem(invalidCleanupType, null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Invalid part-file cleanup type: 'bad-cleanup'")
+        .hasMessageContaining("ALWAYS");
   }
 }

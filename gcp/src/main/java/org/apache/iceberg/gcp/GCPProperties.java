@@ -44,8 +44,82 @@ public class GCPProperties implements Serializable {
   public static final String GCS_ENCRYPTION_KEY = "gcs.encryption-key";
   public static final String GCS_USER_PROJECT = "gcs.user-project";
 
+  private static final int MB = 1024 * 1024;
+
   public static final String GCS_CHANNEL_READ_CHUNK_SIZE = "gcs.channel.read.chunk-size-bytes";
   public static final String GCS_CHANNEL_WRITE_CHUNK_SIZE = "gcs.channel.write.chunk-size-bytes";
+  public static final int GCS_CHANNEL_WRITE_CHUNK_SIZE_DEFAULT = 24 * MB;
+
+  // KMS Encryption Options
+  public static final String GCS_KMS_KEY_NAME = "gcs.kms-key-name";
+
+  // Checksum Validation
+  public static final String GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED =
+      "gcs.channel.write.checksum-validation.enabled";
+  public static final boolean GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_DEFAULT = false;
+
+  /**
+   * Upload strategy used by GCS write channels when {@code gcs-analytics-core} is enabled (matches
+   * {@code com.google.cloud.gcs.analyticscore.client.GcsClientOptions.UploadType}).
+   *
+   * <p>Supported values are:
+   *
+   * <ul>
+   *   <li>{@link #GCS_CHANNEL_WRITE_UPLOAD_TYPE_CHUNK_UPLOAD} (default): Direct streaming chunked
+   *       upload.
+   *   <li>{@link #GCS_CHANNEL_WRITE_UPLOAD_TYPE_PARALLEL_COMPOSITE_UPLOAD}: Parallel composite
+   *       upload (PCU) splitting large files across multiple concurrent threads.
+   *   <li>{@link #GCS_CHANNEL_WRITE_UPLOAD_TYPE_WRITE_TO_DISK_THEN_UPLOAD}: Buffers data to local
+   *       disk before uploading.
+   * </ul>
+   */
+  public static final String GCS_CHANNEL_WRITE_UPLOAD_TYPE = "gcs.channel.write.upload-type";
+
+  public static final String GCS_CHANNEL_WRITE_UPLOAD_TYPE_CHUNK_UPLOAD = "CHUNK_UPLOAD";
+  public static final String GCS_CHANNEL_WRITE_UPLOAD_TYPE_PARALLEL_COMPOSITE_UPLOAD =
+      "PARALLEL_COMPOSITE_UPLOAD";
+  public static final String GCS_CHANNEL_WRITE_UPLOAD_TYPE_WRITE_TO_DISK_THEN_UPLOAD =
+      "WRITE_TO_DISK_THEN_UPLOAD";
+  public static final String GCS_CHANNEL_WRITE_UPLOAD_TYPE_DEFAULT =
+      GCS_CHANNEL_WRITE_UPLOAD_TYPE_CHUNK_UPLOAD;
+
+  // Parallel Composite Upload (PCU) Options (matches GcsClientOptions PCU keys)
+  public static final String GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT =
+      "gcs.channel.write.pcu.buffer.count";
+  public static final int GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT_DEFAULT = 1;
+
+  public static final String GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY =
+      "gcs.channel.write.pcu.buffer.capacity-bytes";
+  public static final int GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY_DEFAULT = 32 * MB;
+
+  /**
+   * Cleanup policy for temporary part files generated during parallel composite uploads.
+   *
+   * <p>Supported values are:
+   *
+   * <ul>
+   *   <li>{@link #GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ALWAYS} (default): Deletes part files on both
+   *       success and failure.
+   *   <li>{@link #GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_NEVER}: Retains part files indefinitely.
+   *   <li>{@link #GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ON_SUCCESS}: Deletes part files only upon
+   *       successful upload.
+   * </ul>
+   */
+  public static final String GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE =
+      "gcs.channel.write.pcu.part-file.cleanup-type";
+
+  public static final String GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ALWAYS = "ALWAYS";
+  public static final String GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_NEVER = "NEVER";
+  public static final String GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ON_SUCCESS = "ON_SUCCESS";
+  public static final String GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_DEFAULT =
+      GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_ALWAYS;
+
+  public static final String GCS_CHANNEL_WRITE_PCU_NAME_PREFIX =
+      "gcs.channel.write.pcu.part-file.name-prefix";
+  public static final String GCS_CHANNEL_WRITE_PCU_NAME_PREFIX_DEFAULT = "";
+
+  public static final String GCS_CHANNEL_WRITE_TEMPORARY_PATHS =
+      "gcs.channel.write.temporary-paths";
 
   public static final String GCS_OAUTH2_TOKEN = "gcs.oauth2.token";
   public static final String GCS_OAUTH2_TOKEN_EXPIRES_AT = "gcs.oauth2.token-expires-at";
@@ -87,6 +161,7 @@ public class GCPProperties implements Serializable {
 
   private String gcsDecryptionKey;
   private String gcsEncryptionKey;
+  private String gcsKmsKeyName;
   private String gcsUserProject;
 
   private Integer gcsChannelReadChunkSize;
@@ -98,6 +173,14 @@ public class GCPProperties implements Serializable {
   private String gcsOauth2RefreshCredentialsEndpoint;
   private boolean gcsOauth2RefreshCredentialsEnabled;
   private boolean gcsAnalyticsCoreEnabled;
+
+  private boolean gcsChecksumValidationEnabled = GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_DEFAULT;
+  private String gcsChannelWriteUploadType = GCS_CHANNEL_WRITE_UPLOAD_TYPE_DEFAULT;
+  private int gcsChannelWritePcuBufferCount = GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT_DEFAULT;
+  private int gcsChannelWritePcuBufferCapacity = GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY_DEFAULT;
+  private String gcsChannelWritePcuCleanupType = GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_DEFAULT;
+  private String gcsChannelWritePcuNamePrefix = GCS_CHANNEL_WRITE_PCU_NAME_PREFIX_DEFAULT;
+  private List<String> gcsChannelWriteTemporaryPaths;
 
   private String gcsImpersonateServiceAccount;
   private int gcsImpersonateLifetimeSeconds;
@@ -197,6 +280,41 @@ public class GCPProperties implements Serializable {
 
     gcsAnalyticsCoreEnabled =
         PropertyUtil.propertyAsBoolean(properties, GCS_ANALYTICS_CORE_ENABLED, false);
+
+    this.gcsKmsKeyName = properties.get(GCS_KMS_KEY_NAME);
+    this.gcsChecksumValidationEnabled =
+        PropertyUtil.propertyAsBoolean(
+            properties,
+            GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_ENABLED,
+            GCS_CHANNEL_WRITE_CHECKSUM_VALIDATION_DEFAULT);
+
+    this.gcsChannelWriteUploadType =
+        properties.getOrDefault(
+            GCS_CHANNEL_WRITE_UPLOAD_TYPE, GCS_CHANNEL_WRITE_UPLOAD_TYPE_DEFAULT);
+
+    this.gcsChannelWritePcuBufferCount =
+        PropertyUtil.propertyAsInt(
+            properties,
+            GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT,
+            GCS_CHANNEL_WRITE_PCU_BUFFER_COUNT_DEFAULT);
+
+    this.gcsChannelWritePcuBufferCapacity =
+        PropertyUtil.propertyAsInt(
+            properties,
+            GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY,
+            GCS_CHANNEL_WRITE_PCU_BUFFER_CAPACITY_DEFAULT);
+
+    this.gcsChannelWritePcuCleanupType =
+        properties.getOrDefault(
+            GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE, GCS_CHANNEL_WRITE_PCU_CLEANUP_TYPE_DEFAULT);
+
+    this.gcsChannelWritePcuNamePrefix =
+        properties.getOrDefault(
+            GCS_CHANNEL_WRITE_PCU_NAME_PREFIX, GCS_CHANNEL_WRITE_PCU_NAME_PREFIX_DEFAULT);
+
+    List<String> tempPaths =
+        parseCommaSeparatedList(properties.get(GCS_CHANNEL_WRITE_TEMPORARY_PATHS), null);
+    this.gcsChannelWriteTemporaryPaths = tempPaths != null ? ImmutableList.copyOf(tempPaths) : null;
   }
 
   public Optional<Integer> channelReadChunkSize() {
@@ -277,5 +395,37 @@ public class GCPProperties implements Serializable {
 
   public boolean isGcsAnalyticsCoreEnabled() {
     return gcsAnalyticsCoreEnabled;
+  }
+
+  public String kmsKeyName() {
+    return gcsKmsKeyName;
+  }
+
+  public boolean checksumValidationEnabled() {
+    return gcsChecksumValidationEnabled;
+  }
+
+  public String channelWriteUploadType() {
+    return gcsChannelWriteUploadType;
+  }
+
+  public int channelWritePcuBufferCount() {
+    return gcsChannelWritePcuBufferCount;
+  }
+
+  public int channelWritePcuBufferCapacity() {
+    return gcsChannelWritePcuBufferCapacity;
+  }
+
+  public String channelWritePcuCleanupType() {
+    return gcsChannelWritePcuCleanupType;
+  }
+
+  public String channelWritePcuNamePrefix() {
+    return gcsChannelWritePcuNamePrefix;
+  }
+
+  public List<String> channelWriteTemporaryPaths() {
+    return gcsChannelWriteTemporaryPaths;
   }
 }
